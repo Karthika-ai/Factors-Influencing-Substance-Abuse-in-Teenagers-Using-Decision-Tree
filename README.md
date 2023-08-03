@@ -30,7 +30,7 @@ Feature selection is done by using information gain function and imputing missin
     - If a person is not consuming tobacco and their friends are against using marijuana, they are not prone to marijuana consumption.
     - If a person consumes tobacco and their friends are against using marijuana, but their parents somewhat disapprove, they still consume marijuana.
 
-- Classifying the Risk of teenagers consuming marijuana
+- Classifying the Risk of Teenagers Consuming Marijuana
     - If the teenagers, their parents and their peers neither approve nor disapprove about using marijuana and the teenagers have the habit       of alcohol consumption, then they are at high risk of consuming marijuana at least once a week.
       
 - Predicting the Frequency of Marijuana Consumption
