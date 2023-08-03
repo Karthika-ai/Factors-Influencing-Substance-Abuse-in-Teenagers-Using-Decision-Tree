@@ -40,5 +40,12 @@ Feature selection is done by using information gain function and imputing missin
 ## Results
 The primary factors that were responsible for marijuana consumption were the other 10 substance usage such as alcohol and tobacco. This is because the use of one substance leads to the other. Here the study used a binary classification model to classify if a teenager used marijuana with a performance rate of 91%. The multi-class classification model using random forest was used to predict the risk of consuming marijuana more than once a week with the accuracy rate of 47%. Finally a regression model combined with the use of a boosting method was used to predict the frequency of marijuana usage in a year. This model’s training and test error were similar thus making the model a better fit
 
+## Reference
+- (n.d.). National Survey on Drug Use and Health (NSDUH). SAMHDA. https://www.datafiles.samhsa.gov/dataset/national-survey-drug-use-and-health-2020-nsduh-2020-ds0001
+- (n.d.). Drug Use Among Youth: Facts & Statistics. NCDAS. https://drugabusestatistics.org/teen-drug-use/
+- Alam, M. (2022, April 25). Feature selection: A comprehensive list of strategies. Towards Data Science.https://towardsdatascience.com/feature-selection-a-comprehensive-list-of-strategies-3fecdf802b79
+- A. T. (2020, February 17). How is information gain calculated? R Bloggers. https://www.r-bloggers.com/2020/02/how-is-information-gain-calculated/
+- James, G., Witten, D., Hastie, T., & Tibshirani, R. (n.d.).An Introduction to Statistical Learning. Retrieved April 10, 2023, from https://www.statlearning.com/
+
 
 
