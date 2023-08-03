@@ -1,0 +1,943 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+##### Loading the Libraries required for the analysis
+
+```{r}
+library(FSelector)  # Feature Selection
+library(tidyverse)
+library(tree) # Decision Tree
+library(gbm)  # Boosting 
+library(rpart)
+library(rpart.plot)
+library(randomForest) # Bagging and Random Forest
+```
+
+##### Loading the Dataset NSDUH_2020.Rdata
+
+```{r}
+load("/Users/kat/Documents/SeattleU/Spring 23/Written Homework-1/NSDUH_2020.Rdata")
+```
+
+##### Data Pre-Processing
+
+Followed the steps from the Youth.R 
+```{r}
+# select those that answered the youth experiences questions
+youth <- NSDUH_2020[!is.na(NSDUH_2020$schfelt),]  #  There are 5500 observations
+
+# make a vector of substance use column names
+substance_cols <- c(   'iralcfy',# quantitative values for frequency of use
+                       'irmjfy', # marijuana frequency past year (1-365)
+                       'irmjfm', # marijuana frequency past month (1-30)
+                       
+                       # quantitative values for age of first use
+                       'irmjage', # marijuana age of first use (1-83), 991=never used
+                       
+                       # binary categories for use at all
+                       'mrjflag', # marijuana ever used (0=never, 1=ever)
+                       'alcflag', # alcohol ever used (0=never, 1=ever)
+                       'tobflag', # tobacco ever used (0=never, 1=ever)
+                       
+                       # multiclass categories for frequency of use 
+                       'alcmdays',# number of days of alcohol in past month (1-4 categories, 5=none)
+                       'cigmdays',# number of days of cigarette in past month (1-4 categories, 5=none)
+                       'iralcrc', # how recently alcohol was used (1-3 categories,9 = never)
+                       'mrjydays','alcydays', # number of days of marijuana and alcohol in past year (1-5 categories, 6=none)
+                       'mrjmdays', # number of days of marijuana in past month (1-4 categories, 5=none)
+                       'ysdssoc' # Youth major depression episode (1-5 categories)
+    )
+
+# make a vector of demographic column names
+demographic_cols <- c(
+                  'irsex', # binary sex (1=male, 2=female)
+                  'NEWRACE2', # race (7 categories)
+                  'HEALTH2', # overall health (4 categories)
+                  'eduschlgo', # now going to school (1=yes, 2=no)
+                  'EDUSCHGRD2', # what grade in now/will be in (11 categories, 98,99= blank/skip)
+                  'eduskpcom', #how many days skipped school in past month (1-30, 94/97/98/99=blank/skip)
+                  'imother', # for youth, mother in household (1=yes, 2=no, 3=don't know, 4=over 18)
+                  'ifather', # for youth, father in household (1=yes, 2=no, 3=don't know, 4=over 18)
+                  'income', # total family income (4 categories)
+                  'govtprog', # got gov assistance (1=yes, 2=no)
+                  'POVERTY3', # poverty level (4 categories)
+                  'PDEN10', # population density (1= >1M people, 2=<1M people, 3=can't be determined)
+                  'COUTYP4' # metro size status (1=large metro, 2=small metro, 3=nonmetro)
+                  )
+
+# Other variables which could possibly have influence:
+col_1 <- c('ymdelt','CATAG7','drvindrg','uadfwho','irwrkstat','rskmrjwk') #,'stndsmj'
+# select columns of interest
+df_dep <- youth %>% select(col_1)
+df_youth <- youth %>% select(schfelt:rlgfrnd) # use all youth questions, start with schfelt and go through rlgfrnd
+df_substance <- youth %>% select(substance_cols) # select specific substance columns of interest
+df_demog <- youth %>% select(demographic_cols)  # select specific demographic columns of interest
+
+# combine into one data frame
+df = cbind(df_dep,df_substance, df_youth, df_demog) #combine into one data frame
+
+# Replacing a meaningful value
+
+df["irmjfy"][df["irmjfy"] == 991 | df["irmjfy"] == 993] <- 0
+df["iralcfy"][df["iralcfy"] == 991 | df["iralcfy"] == 993] <- 0
+df["irmjfm"][df["irmjfm"] == 91 | df["irmjfm"] == 93] <- 0
+df["irmjage"][df["irmjage"] == 991 ] <- 0
+df["rskmrjwk"][df["rskmrjwk"] == 85 | df["rskmrjwk"] == 94 | df["rskmrjwk"] == 98 | df["rskmrjwk"] == 97] <- 0
+
+
+# make vector of columns from the data that should be converted to factors, unordered and ordered
+unordered_factor_cols <- c(names(df_youth),"ymdelt","rskmrjwk",# all columns from youth
+                           'CATAG7','uadfwho','irwrkstat','ysdssoc','alcmdays','iralcrc','mrjydays',
+                           'mrjflag','alcflag','tobflag','drvindrg', # binary flag columns from substance
+                           'irsex','NEWRACE2','eduschlgo','imother','ifather','govtprog','PDEN10','COUTYP4' # unordered categories for demographics
+                           ) 
+ordered_factor_cols <- c('EDUSCHGRD2','HEALTH2','POVERTY3','income','mrjmdays',"alcydays")
+
+# convert to factors
+df[unordered_factor_cols] <- lapply(df[unordered_factor_cols], factor) # correct columns to unordered factors (e.g. yes, no)
+df[ordered_factor_cols] <- lapply(df[ordered_factor_cols], factor, ordered=TRUE) # correct columns to ordered factors (e.g. small, medium, large)
+
+```
+
+Imputing the missing values values with mode if it is a factor or with mean if it is a numeric 
+
+```{r}
+# loop through all columns
+for (col in names(df)) {
+  # check if column is a factor
+  if (is.factor(df[[col]])) {
+    # replace missing values with the mode
+    df[[col]][is.na(df[[col]])] <- names(sort(table(df[[col]]), decreasing = TRUE))[1]
+  }
+  # check if column is numeric
+  else if (is.numeric(df[[col]])) {
+    # replace missing values with the mean
+    df[[col]][is.na(df[[col]])] <- mean(df[[col]], na.rm = TRUE)
+  }
+}
+```
+
+##### Feature Selection using Information gain for the consumption of Marijuana
+
+```{r}
+info_gain_1 <- information.gain(mrjflag ~ ., data=df)
+info_gain_1
+```
+Subsetting the significant variables related to the marijuana for the analysis 
+
+Note : Ignoring other marijuna related variables as they are highly correlated, we need to identify the other factors that potentially affect.
+
+```{r}
+df1 <- df%>% select(c('mrjflag','FRDMEVR2','stndalc','prmjmo','irwrkstat','eduskpcom','HEALTH2','tobflag','EDUSCHGRD2','uadfwho','stndsmj','FRDPCIG2','ysdssoc'))
+```
+
+
+##### Splitting of Training and Test datasets
+
+```{r}
+set.seed(5)
+train <- sample(1:nrow(df1), nrow(df1)*0.7) 
+NSDUH_train_set <- df1[train,]
+NSDUH_test_set <- df1[-train,]
+```
+
+##### Model 1 - Consumption of Marijuana in Teens
+ 
+Decision Tree 
+
+Ignoring the Other drug related parameters
+
+```{r}
+model_1 <-tree(mrjflag ~ FRDMEVR2+stndalc+prmjmo+irwrkstat+eduskpcom+HEALTH2+tobflag+EDUSCHGRD2+uadfwho+stndsmj+FRDPCIG2+ysdssoc,
+               NSDUH_train_set)
+summary(model_1)
+```
+
+
+The training error rate is 9%, the primary factor that influence the marijuana consumption is how the peer feel about conuming marijuana (FRDMEVR2)
+
+
+Performance of the model on test dataset 
+
+```{r}
+m1test_pred <- predict(model_1,NSDUH_test_set,type="class")
+table(m1test_pred,NSDUH_test_set$mrjflag)
+print(paste(" Accuracy of test set :",round(mean((m1test_pred == NSDUH_test_set$mrjflag)) *100)," %"))
+```
+
+The performance of the model on the test data is 90% , the difference in the test and training data is due to the overfitting  of the training dataset.
+
+Pruning the tree to reduce the complexity of the model and to check if the accuracy of the model can be improved
+
+###### Cross-Validation to select the optimum tree size
+```{r}
+# Using cross validation
+set.seed(0)
+cv.model1 <- cv.tree(model_1)
+cv.model1
+```
+
+
+```{r}
+plot(cv.model1$size,cv.model1$dev,type="b",xlab = "Size of the tree",ylab = "Deviance")+title("Cross Validation")
+```
+
+Pruning the tree with the size 6
+
+```{r}
+# Pruning the tree
+
+prune.model1 <- prune.misclass(model_1,best=6)
+plot(prune.model1)
+text(prune.model1,pretty=0)
+df_rpart_1_pruned <- rpart(model_1, data = NSDUH_train_set)
+rpart.plot(df_rpart_1_pruned )
+
+```
+
+```{r}
+# Predicting the  training and test set with the pruned tree model
+prune.pred <- predict(prune.model1,NSDUH_train_set,type="class")
+table(prune.pred,NSDUH_train_set$mrjflag)
+print(paste(" Accuracy for the Training set of the pruned tree model",round(mean(prune.pred == NSDUH_train_set$mrjflag)*100),"%"))
+
+prune.pred <- predict(prune.model1,NSDUH_test_set,type="class")
+table(prune.pred,NSDUH_test_set$mrjflag)
+print(paste(" Accuracy for the Test set of the pruned tree model",round(mean(prune.pred == NSDUH_test_set$mrjflag)*100),"%"))
+```
+
+Pruning the tree have'nt improved the performance of the tree model.
+
+###### The Ensembel Methods:
+
+Bagging:
+
+```{r}
+bag.model1 <- randomForest(mrjflag ~ ., data = NSDUH_train_set, mtry =length(NSDUH_train_set) , importance = TRUE)
+bag.model1
+```
+
+Performance of bagging on Training and Test dataset:
+
+```{r}
+yhat.train.bag <- predict(bag.model1, newdata = NSDUH_train_set,type="class")
+print(paste("TPerformance of bagging on Training data:",round(mean(yhat.train.bag ==NSDUH_train_set$mrjflag)*100),"%"))
+table(yhat.train.bag,NSDUH_train_set$mrjflag)
+
+yhat.test.bag <- predict(bag.model1, newdata = NSDUH_test_set,type="class")
+print(paste("Performance of bagging on Test data:",round(mean(yhat.test.bag ==NSDUH_test_set$mrjflag)*100),"%"))
+table(yhat.test.bag,NSDUH_test_set$mrjflag)
+```
+
+The model is overfitting the training data and reduced performance in the test data.
+
+To check the nodal purity using Ginni index
+
+```{r}
+importance(bag.model1)
+varImpPlot(bag.model1)
+```
+Consumption of tobacco and peer's opinion on the drug consumption are vital factors in determining the response variable (usage of marijuana)
+
+```{r}
+k = data.frame(importance(bag.model1))
+k1 =k[order(-k$MeanDecreaseAccuracy),]
+k2 =k1%>% top_n(20)
+k3 = k2 %>% select("MeanDecreaseAccuracy","MeanDecreaseGini")
+k3 = setNames(cbind(rownames(k3),k3,row.names=NULL),c("PREDICTORS","X.IncMSE","MeanDecreaseGini"))
+#barplot(k3$MeanDecreaseAccuracy~k3$PREDICTORS,horiz=TRUE)
+ggplot(data=k3,aes(x=MeanDecreaseGini,y=reorder(PREDICTORS,MeanDecreaseGini)))+geom_bar(stat="identity",fill="purple")+
+ggtitle("Variable Importance for Consumption of Marijuana  ")+ylab("Variables")+xlab("Mean Decrease in Gini")+theme(plot.title = element_text(hjust=0.5),plot.caption = element_text(hjust=0.5))
+```
+
+Random Forest method 
+
+```{r}
+set.seed(5)
+
+p <- seq(1,length(NSDUH_train_set),by=1)
+error<-c( )
+
+for(i in 1:length(p))
+{
+  rf.model1 <- randomForest(mrjflag ~ ., data = NSDUH_train_set, mtry = i, importance = TRUE)
+yhat.rf <- predict(rf.model1, newdata = NSDUH_test_set)
+error[i] = mean(yhat.rf!= NSDUH_test_set$mrjflag)
+  
+}
+```
+
+Plotting the error rate for  different subset of parameters:
+
+```{r}
+plot(p,error,type="b",xlab ="Subset of paramter",ylab=" Test MSE")+ title(" Cross- validation for the optimal subset of parameters")
+index<- which.min(round(error,3)) # Index of the minimum MSE 
+Min_error <- error[index]
+min_p <- p[index]
+abline(v=min_p,col="red")
+#text(min_p,Min_error,"Least Mse")
+best_subset = min_p
+
+print(paste("Best number of subset of variable selection is : ",best_subset," has the test error rate of :",round(Min_error,2)))
+```
+
+```{r}
+bag.model1e <- randomForest(mrjflag ~ ., data = NSDUH_train_set, mtry = 2,ntree=1000,importance = TRUE)
+bag.model1a <- randomForest(mrjflag ~ ., data = NSDUH_train_set, mtry = 5,ntree=1000,importance = TRUE)
+bag.model1b <- randomForest(mrjflag ~ ., data = NSDUH_train_set, mtry = 7,ntree=1000, importance = TRUE)
+bag.model1c <- randomForest(mrjflag ~ ., data = NSDUH_train_set, mtry = 9,ntree=1000,importance = TRUE)
+bag.model1d <- randomForest(mrjflag ~ ., data = NSDUH_train_set, mtry = 13,ntree=1000,importance = TRUE)
+
+```
+
+```{r}
+# Graph to plot the error rate for different parameters for m = p,p/2,srt(p)
+
+model3.err <- data.frame(
+  Trees=1:1000,
+  Error=c(bag.model1e$err.rate[,"OOB"],bag.model1a$err.rate[,"OOB"],bag.model1b$err.rate[,"OOB"], bag.model1c$err.rate[,"OOB"],bag.model1d$err.rate[,"OOB"]),
+  Type=rep(c("RF, m=2","RF, m=5","RF, m=7", "RF, m=9","BAG, m=13"), each=1000)
+)
+ggplot(data=model3.err, aes(x=Trees, y=Error)) +  geom_line(aes(color=Type)) + ggtitle("Error vs Number of Trees") +xlim(0,1000)+theme(plot.title = element_text(hjust=0.5))+guides(color = guide_legend(title = "Methods, Parameters"))
+```
+
+
+```{r}
+yhat.train.bag <- predict(bag.model1e, newdata = NSDUH_train_set,type="class")
+print(paste("Test MSE of the RF model with subset of 2 predictors:",mean(yhat.train.bag ==NSDUH_train_set$mrjflag)))
+table(yhat.train.bag,NSDUH_train_set$mrjflag)
+
+```
+
+```{r}
+yhat.test.bag <- predict(bag.model1e, newdata = NSDUH_test_set,type="class")
+print(paste("Test MSE of the RF model with subset of 2 predictors:",mean(yhat.test.bag ==NSDUH_test_set$mrjflag)))
+table(yhat.test.bag,NSDUH_test_set$mrjflag)
+
+```
+
+The overfitting on the training data is reduced compared to the bagging model and small improvement on the test dataset performance
+
+Boosting Method:
+
+```{r}
+model1.boost1 = gbm(mrjflag ~ ., data = NSDUH_train_set,  distribution = "gaussian", 
+                    n.trees = 1000, shrinkage = 0.01)
+model1.boost2 = gbm(mrjflag ~ ., data = NSDUH_train_set,  distribution = "gaussian", 
+                    n.trees = 1000,shrinkage = 0.05)
+model1.boost3 = gbm(mrjflag ~ ., data = NSDUH_train_set,  distribution = "gaussian", 
+                    n.trees = 1000, shrinkage = 0.1)
+model1.boost4 = gbm(mrjflag ~ ., data = NSDUH_train_set,  distribution = "gaussian", 
+                    n.trees = 1000,shrinkage = 0.2)
+model1.boost5 = gbm(mrjflag ~ ., data = NSDUH_train_set,  distribution = "gaussian", 
+                    n.trees = 1000, shrinkage = 0.4)
+model1.boost6 = gbm(mrjflag ~ ., data = NSDUH_train_set,  distribution = "gaussian", 
+                    n.trees = 1000, shrinkage = 0.5)
+```
+
+Plotting the learning rate :
+
+```{r}
+model1.err <- data.frame(
+  Trees=1:1000,
+  Error=c(model1.boost1$train.error,model1.boost2$train.error,model1.boost3$train.error,
+          model1.boost4$train.error,model1.boost5$train.error,model1.boost6$train.error),
+  Type=rep(c("BOOST, λ=0.01","BOOST, λ=0.05", "BOOST, λ=0.1","BOOST, λ=0.2","BOOST, λ=0.4","BOOST, λ=0.5"), each=1000)
+)
+ggplot(data=model1.err, aes(x=Trees, y=Error)) +  geom_line(aes(color=Type)) + ggtitle("Error vs Number of Trees") +xlim(0,1000)+theme(plot.title = element_text(hjust=0.5))
+```
+
+```{r}
+model1.boost2 = gbm(mrjflag ~ ., data = NSDUH_train_set,  distribution = "gaussian", 
+                    n.trees = 1000,shrinkage = 0.1)
+
+boost.pred_train <- predict(model1.boost2,NSDUH_train_set,n.trees = 1000,type = "response")
+boost.pred_test <- predict(model1.boost2,NSDUH_test_set,n.trees = 1000,type = "response")
+```
+
+
+```{r}
+pred.test <- ifelse(boost.pred_test > 1.5,1,0)
+table(pred.test,NSDUH_test_set$mrjflag)
+
+(1371+126)/(1371+107+47+126)
+
+pred.train <- ifelse(boost.pred_train > 1.5,1,0)
+table(pred.train,NSDUH_train_set$mrjflag)
+(3223+301)/(3210+314+85+231)
+
+```
+
+Training Performance : 92%
+Test Performance : 90.6%
+
+Plots to compare the  Bagging, Boosting and Random Forest models
+
+```{r}
+# Graph to plot the error rate for different parameters for m = p,p/2,srt(p)
+
+model3.err <- data.frame(
+  Trees=1:1000,
+  Error=c(bag.model1d$err.rate[,"OOB"],bag.model1e$err.rate[,"OOB"],model1.boost2$train.error),  
+  Type=rep(c("BAG, m=13","RF, m=2","BOOST, λ=0.05"), each=1000)                      
+)
+ggplot(data=model3.err, aes(x=Trees, y=Error)) +  geom_line(aes(color=Type)) + ggtitle("Error vs Number of Trees")+theme(plot.title = element_text(hjust=0.5))+guides(color = guide_legend(title = "Methods, Parameters"))
+```
+
+Thus for the Training and Test dataset, boosting performs well 
+
+
+##### Model-2 Multi-class classification
+
+###### Feature Selection: 
+
+Response Variable:
+
+RSKMRJWK - RISK SMOKING MARIJUANA ONCE OR TWICE A WEEK
+
+```{r}
+info_gain_2 <- information.gain(rskmrjwk ~ ., data=df)
+info_gain_2
+```
+
+
+```{r}
+df2 <- df %>% select(c("rskmrjwk","YFLTMRJ2","FRDMEVR2","irmjfy","mrjydays","PRMJEVR2","iralcrc","alcflag","stndsmj","CATAG7",
+                         "EDUSCHGRD2","irwrkstat","tobflag","stndalc","PRLMTTV2"))
+```
+
+
+###### Splitting of Training and Test datasets
+
+```{r}
+set.seed(5)
+train <- sample(1:nrow(df2), nrow(df2)*0.7) 
+NSDUH_train_set_2 <- df2[train,]
+NSDUH_test_set_2 <- df2[-train,]
+```
+
+
+
+###### Decision Tree
+
+Ignoring the Other drug related parameters
+
+```{r}
+model_2 <-tree(rskmrjwk ~., NSDUH_train_set_2)
+summary(model_2)
+plot(model_2)
+text(model_2,pretty=0)
+```
+
+Accuracy of the model on Train dataset 
+
+```{r}
+m2test_pred <- predict(model_2,NSDUH_train_set_2,type="class")
+table(m2test_pred,NSDUH_train_set_2$rskmrjwk)
+mean(m2test_pred==NSDUH_train_set_2$rskmrjwk)
+
+```
+
+
+Accuracy of the model on test dataset 
+
+```{r}
+m2test_pred <- predict(model_2,NSDUH_test_set_2,type="class")
+table(m2test_pred,NSDUH_test_set_2$rskmrjwk)
+mean(m2test_pred==NSDUH_test_set_2$rskmrjwk)
+
+```
+
+
+The model performs well for the test dataset when compared to the training data . this is because of the model unfitting to the training data
+
+###### Bagging:
+
+```{r}
+bag.model2 <- randomForest(rskmrjwk ~., data = NSDUH_train_set_2, mtry =length(NSDUH_train_set_2) , importance = TRUE)
+bag.model2
+```
+
+```{r}
+yhat.train.bag <- predict(bag.model2, newdata = NSDUH_train_set_2,type="class")
+table(yhat.train.bag,NSDUH_train_set_2$rskmrjwk)
+mean(yhat.train.bag == NSDUH_train_set_2$rskmrjwk)
+
+yhat.test.bag <- predict(bag.model2, newdata = NSDUH_test_set_2,type="class")
+table(yhat.test.bag,NSDUH_test_set_2$rskmrjwk)
+mean(yhat.test.bag == NSDUH_test_set_2$rskmrjwk)
+
+```
+
+The bagging model has accuracy of 68% for training data and 30 % for test data
+
+###### Cross-Validation of optimal subset of parameter for Random Forest
+
+```{r}
+set.seed(5)
+
+p <- seq(1,length(NSDUH_train_set_2),by=1)
+error<-c( )
+
+for(i in 1:length(p))
+{
+  rf.model2 <- randomForest(rskmrjwk ~., data = NSDUH_train_set_2, mtry = i, importance = TRUE)
+yhat.rf <- predict(rf.model2, newdata = NSDUH_test_set_2)
+error[i] = mean(yhat.rf!= NSDUH_test_set_2$rskmrjwk)
+  
+}
+
+```
+
+
+```{r}
+plot(p,error,type="b",xlab ="Subset of paramter",ylab=" Test MSE")
+index<- which.min(round(error,2)) # Index of the minimum MSE 
+Min_error <- error[index]
+min_p <- p[index]
+abline(v=min_p,col="red")
+#text(min_p,Min_error,"Least Mse")
+best_subset = min_p
+
+print(paste("Best number of subset of variable selection is : ",best_subset," has the test error rate of :",Min_error))
+```
+
+###### Training and Test Mse  for the Random Forest model with parameter subset of 2 variables
+
+```{r}
+bag.model2e <- randomForest(rskmrjwk ~ ., data = NSDUH_train_set_2, mtry = 2,ntree=1000,importance = TRUE)
+yhat.train.bag <- predict(bag.model2e, newdata = NSDUH_train_set_2,type="class")
+
+table(yhat.train.bag,NSDUH_train_set_2$rskmrjwk)
+mean(yhat.train.bag == NSDUH_train_set_2$rskmrjwk)
+print(paste("Train MSE of the RF model with p=2:",mean(yhat.train.bag ==NSDUH_train_set_2$rskmrjwk)))
+```
+
+
+```{r}
+bag.model2e <- randomForest(rskmrjwk ~ ., data = NSDUH_train_set_2, mtry = 2,ntree=1000,importance = TRUE)
+yhat.test.bag <- predict(bag.model2e, newdata = NSDUH_test_set_2,type="class")
+
+table(yhat.test.bag,NSDUH_test_set_2$rskmrjwk)
+mean(yhat.test.bag == NSDUH_test_set_2$rskmrjwk)
+print(paste("Test MSE of the RF model with p=2:",mean(yhat.test.bag ==NSDUH_test_set_2$rskmrjwk)))
+```
+
+This methods performs better than bagging by increasing the model's performance rate to 56.8%
+
+```{r}
+importance(bag.model2)
+varImpPlot(bag.model2)
+```
+
+```{r}
+k = data.frame(importance(bag.model2))
+k1 =k[order(-k$MeanDecreaseAccuracy),]
+k2 =k1%>% top_n(20)
+k3 = k2 %>% select("MeanDecreaseAccuracy","MeanDecreaseGini")
+k3 = setNames(cbind(rownames(k3),k3,row.names=NULL),c("PREDICTORS","MeanDecreaseAccuracy","MeanDecreaseGini"))
+#barplot(k3$MeanDecreaseAccuracy~k3$PREDICTORS,horiz=TRUE)
+ggplot(data=k3,aes(x=MeanDecreaseAccuracy,y=reorder(PREDICTORS,MeanDecreaseAccuracy)))+geom_bar(stat="identity",fill="purple")+
+ggtitle("Variable Importance for Consumption of Marijuana  ")+ylab("Variables")+xlab("MeanDecreaseAccuracy")+theme(plot.title = element_text(hjust=0.5),plot.caption = element_text(hjust=0.5))
+```
+
+###### Boosting:
+
+
+```{r}
+model2.boost1 = gbm(rskmrjwk ~ ., data = NSDUH_train_set_2,  distribution = "gaussian", 
+                    n.trees = 1000, shrinkage = 0.01)
+model2.boost2 = gbm(rskmrjwk ~ ., data = NSDUH_train_set_2,  distribution = "gaussian", 
+                    n.trees = 1000,shrinkage = 0.05)
+model2.boost3 = gbm(rskmrjwk ~ ., data = NSDUH_train_set_2,  distribution = "gaussian", 
+                    n.trees = 1000, shrinkage = 0.1)
+model2.boost4 = gbm(rskmrjwk ~ ., data = NSDUH_train_set_2,  distribution = "gaussian", 
+                    n.trees = 1000,shrinkage = 0.2)
+model2.boost5 = gbm(rskmrjwk ~ ., data = NSDUH_train_set_2,  distribution = "gaussian", 
+                    n.trees = 1000, shrinkage = 0.4)
+model2.boost6 = gbm(rskmrjwk ~ ., data = NSDUH_train_set_2,  distribution = "gaussian", 
+                    n.trees = 1000, shrinkage = 0.5)
+```
+
+
+
+
+```{r}
+model2.err <- data.frame(
+  Trees=1:1000,
+  Error=c(model2.boost1$train.error,model2.boost2$train.error,model2.boost3$train.error,
+          model2.boost5$train.error),
+  Type=rep(c("BOOST, λ=0.01","BOOST, λ=0.05", "BOOST, λ=0.1","BOOST, λ=0.4"), each=1000)
+)
+ggplot(data=model2.err, aes(x=Trees, y=Error)) +  geom_line(aes(color=Type)) + ggtitle("Error vs Number of Trees") +xlim(0,200)+theme(plot.title = element_text(hjust=0.5))
+```
+
+###### Training and Test error rate :
+
+```{r}
+model2.boost = gbm(rskmrjwk ~ ., data = NSDUH_train_set_2,  distribution = "gaussian", 
+                    n.trees = 1000,shrinkage = 0.4)
+
+boost.pred_train_2 <- predict(model2.boost,NSDUH_train_set_2,n.trees = 1000,type="response")
+boost.pred_test_2 <- predict(model2.boost,NSDUH_test_set_2,n.trees = 1000,type="response")
+```
+
+
+To classify the class by taking round of the probability
+
+```{r}
+class<- function(x) 
+  {
+  if (x < 0.5) 
+    {
+    return(0)
+    } 
+  else if (x > 0.5 && x <1.5) 
+  {
+    return(1)
+  } 
+  else if (x > 1.5 && x <2.5) 
+  {
+    return(2)
+  } 
+  else if (x > 2.5 && x <3.5) 
+  {
+    return(3)
+  }
+  else if (x > 3.5) 
+  {
+    return(4)
+  }
+}
+```
+
+
+
+```{r}
+pred.test_2 <- sapply(boost.pred_test_2,class)
+table(pred.test_2,NSDUH_test_set_2$rskmrjwk)
+mean(pred.test_2 == NSDUH_test_set_2$rskmrjwk )
+
+
+
+pred.train_2 <- sapply(boost.pred_train_2,class)
+table(pred.train_2,NSDUH_train_set_2$rskmrjwk)
+mean(pred.train_2 == NSDUH_train_set_2$rskmrjwk )
+
+
+```
+
+
+###### Overall Performance of Different Methods (check)
+
+```{r}
+model2.err <- data.frame(
+  Trees=1:1000,
+  Error=c(bag.model2a$err.rate[,"OOB"],bag.model2e$err.rate[,"OOB"],
+          model2.boost5$train.error),
+  Type=rep(c("RF, m=2","BAG, m=15","BOOST, λ=0.4"), each=1000)
+)
+ggplot(data=model2.err, aes(x=Trees, y=Error)) +  geom_line(aes(color=Type)) + ggtitle("Error vs Number of Trees") +xlim(0,1000)+theme(plot.title = element_text(hjust=0.5))
+
+```
+
+
+
+##### Model 3 Regression
+
+Response Variable :  IRMJFY - MARIJUANA FREQUENCY PAST YEAR(2019) - IMPUTATION REVISED
+
+###### Feature Selection
+
+```{r}
+info_gain_3 <- information.gain(irmjfy ~ ., data=df)
+info_gain_3
+```
+
+Subsetting the dataset with the inportant variables
+
+```{r}
+df3 <- df %>% select(c('irmjfy','tobflag','uadfwho','prmjmo','HEALTH2','YFLTMRJ2','eduschlgo','cigmdays','stndsmj','EDUSCHGRD2','ANYEDUC3','COUTYP4','CATAG7'))
+```
+
+
+###### Splitting up the dataset for the model 3 
+
+```{r}
+set.seed(5)
+train <- sample(1:nrow(df3), nrow(df)*0.7) 
+NSDUH_train_set_3 <- df3[train,]
+NSDUH_test_set_3 <- df3[-train,]
+```
+
+###### Decision Tree
+
+```{r}
+model_3 <- tree(irmjfy~ tobflag+uadfwho+prmjmo+HEALTH2+YFLTMRJ2+eduschlgo+
+                  cigmdays+stndsmj+EDUSCHGRD2+ANYEDUC3+COUTYP4+CATAG7,NSDUH_train_set_3)
+summary(model_3)
+```
+
+```{r}
+test.pred_3 <- predict(model_3,NSDUH_test_set_3)
+mean((test.pred_3-NSDUH_test_set_3$irmjfy)^2)
+```
+
+
+The residual mean of training data is 1263
+The residual mean of test data is 1430
+
+
+```{r}
+plot(model_3)
+text(model_3,pretty=0)
+df_rpart_3_pruned <- rpart(model_3, data = NSDUH_train_set_3)
+rpart.plot(df_rpart_3_pruned )
+```
+
+
+###### Cross-Validation to select the optimum tree size
+
+```{r}
+# Using cross validation
+set.seed(0)
+cv.model3 <- cv.tree(model_3)
+cv.model3
+```
+
+
+```{r}
+plot(cv.model3$size,cv.model3$dev,type="b",xlab = "Size of the tree","",xlim=c(1,10),ylim = c(5000000,9000000))
+```
+Pruning the tree with the size 5
+
+```{r}
+# Pruning the tree
+
+prune.model3 <- prune.tree(model_3,best=4)
+plot(prune.model3)
+text(prune.model3,pretty=0)
+
+
+```
+
+
+```{r}
+
+df_rpart_3_pruned <- rpart(model_3, data = NSDUH_train_set_3)
+rpart.plot(prune(df_rpart_3_pruned,cp=0.015))
+
+
+```
+
+
+```{r}
+# Predicting the  training and test set with the pruned tree model
+prune.pred_3 <- predict(prune.model3,NSDUH_train_set_3)
+print(paste("Training set Mse of the pruned tree model:",round(mean((prune.pred_3 - NSDUH_train_set_3$irmjfy)^2))))
+
+prune.pred_3 <- predict(prune.model3,NSDUH_test_set_3)
+print(paste("Test set Mse of the pruned tree model:",round(mean((prune.pred_3 - NSDUH_test_set_3$irmjfy)^2))))
+```
+
+
+The test MSE of the pruned tree has not improved
+
+
+###### Bagging and Random Forest:
+
+
+```{r}
+set.seed(5)
+
+p <- seq(1,13,by=1)
+error<-c( )
+
+for(i in 1:length(p))
+{
+  rf.model3 <- randomForest(irmjfy ~ ., data = NSDUH_train_set_3, mtry = i, importance = TRUE)
+yhat.rf <- predict(rf.model3,NSDUH_test_set_3)
+error[i] = mean((yhat.rf - NSDUH_test_set_3$irmjfy)^2)
+  
+}
+
+```
+
+```{r}
+plot(p,error,type="b",xlab ="Subset of paramter",ylab=" Test MSE")
+index<- which.min(error) # Index of the minimum MSE 
+Min_error <- error[index]
+min_p <- p[index]
+abline(v=min_p,col="red")
+#text(min_p,Min_error,"Least Mse")
+best_subset = min_p
+
+print(paste("Best number of subset of variable selection is : ",best_subset))
+```
+
+
+```{r}
+error
+```
+
+```{r}
+rf.model3s <- randomForest(irmjfy ~ ., data = NSDUH_test_set_3, mtry = 13,ntree=500,importance = TRUE)
+```
+
+```{r}
+importance(rf.model3s)
+```
+
+
+```{r}
+k = data.frame(importance(rf.model3s))
+k1 =k[order(-k$X.IncMSE),]
+k2 =k1%>% top_n(20)
+k3 = k2 %>% select("X.IncMSE","IncNodePurity")
+k3 = setNames(cbind(rownames(k3),k3,row.names=NULL),c("PREDICTORS","X.IncMSE","IncNodePurity"))
+barplot(k3$X.IncMSE~k3$PREDICTORS,horiz=TRUE)
+ggplot(data=k3,aes(x=IncNodePurity,y=reorder(PREDICTORS,IncNodePurity)))+geom_bar(stat="identity",fill="purple")+
+ggtitle("Variable Importance for Frequency of Marijuana use in past year ")+ylab("Variables")+xlab("Mean Decrease in Gini")+theme(plot.title = element_text(hjust=0.5),plot.caption = element_text(hjust=0.5))
+
+```
+
+
+```{r}
+rf.model3a <- randomForest(irmjfy ~ ., data = NSDUH_test_set_3, mtry = 2,ntree=1000,importance = TRUE)
+rf.model3b <- randomForest(irmjfy ~ ., data = NSDUH_test_set_3, mtry = 7,ntree=1000, importance = TRUE)
+rf.model3c <- randomForest(irmjfy ~ ., data = NSDUH_test_set_3, mtry = 9,ntree=1000,importance = TRUE)
+rf.model3s <- randomForest(irmjfy ~ ., data = NSDUH_test_set_3, mtry = 13,ntree=1000,importance = TRUE)
+
+```
+
+
+
+
+```{r}
+# Graph to plot the error rate for different parameters for m = p,p/2,srt(p)
+
+model3.err <- data.frame(
+  Trees=1:1000,
+  Error=c(rf.model3a$mse,rf.model3b$mse, rf.model3c$mse,rf.model3s$mse),
+  Type=rep(c("RF, m=2","RF, m=7", "RF, m=9","BAG, m=13"), each=1000)
+)
+ggplot(data=model3.err, aes(x=Trees, y=Error)) +  geom_line(aes(color=Type)) + ggtitle("Error vs Number of Trees") +xlim(0,1000)+theme(plot.title = element_text(hjust=0.5))
+```
+Training and Test performance rate:
+
+
+```{r}
+rf.model3c <- randomForest(irmjfy ~ ., data = NSDUH_train_set_3, mtry = 2,ntree=1000,importance = TRUE)
+yhat.rf <- predict(rf.model3c,NSDUH_train_set_3)
+mean((yhat.rf - NSDUH_train_set_3$irmjfy)^2)
+
+rf.model3s <- randomForest(irmjfy ~ ., data = NSDUH_train_set_3, mtry = 13,ntree=1000,importance = TRUE)
+yhat.rf <- predict(rf.model3s,NSDUH_train_set_3)
+mean((yhat.rf - NSDUH_train_set_3$irmjfy)^2)
+```
+
+
+```{r}
+
+rf.model3c <- randomForest(irmjfy ~ ., data = NSDUH_train_set_3, mtry = 2,ntree=1000,importance = TRUE)
+yhat.rf <- predict(rf.model3c,NSDUH_test_set_3)
+mean((yhat.rf - NSDUH_test_set_3$irmjfy)^2)
+
+rf.model3s <- randomForest(irmjfy ~ ., data = NSDUH_train_set_3, mtry = 13,ntree=1000,importance = TRUE)
+yhat.rf <- predict(rf.model3s,NSDUH_test_set_3)
+mean((yhat.rf - NSDUH_test_set_3$irmjfy)^2)
+```
+
+
+###### Boosting:
+
+```{r}
+
+set.seed(1)
+power <- seq(-3,0,0.01)
+lambda <- 10^power
+error <- rep(NA, length(lambda))
+
+for (i in 1:length(lambda))
+{
+  boost.model3 <- gbm(irmjfy ~. , data = NSDUH_train_set_3,
+      distribution = "gaussian", n.trees = 1000,shrinkage =lambda[i])
+  
+  boost.pred3 <- predict(boost.model3,NSDUH_test_set_3,n.trees = 1000)
+  
+  error[i] <- mean((boost.pred3 - NSDUH_test_set_3$irmjfy)^2 )
+}
+
+
+```
+
+
+```{r}
+index <- which.min(error)
+min_error <- error[index]
+min_lambda <- lambda[index]
+plot(lambda,error,xlab = "Shrinkage parameter(λ)", ylab = "MSE of the training data",xlim=c(0,1),type="b")
+title("Boosting model shrinkage parameter by training error")
+print(paste("best shrinkage vale:",min_lambda,"with MSE of ",min_error))
+min_error
+```
+
+
+```{r}
+boost.model3a <- gbm(irmjfy ~. , data = NSDUH_test_set_3,distribution = "gaussian", n.trees = 1000,shrinkage =0.01)
+boost.model3b <- gbm(irmjfy ~. , data = NSDUH_test_set_3,distribution = "gaussian", n.trees = 1000,shrinkage =0.02)
+boost.model3c <- gbm(irmjfy ~. , data = NSDUH_test_set_3,distribution = "gaussian", n.trees = 1000,shrinkage =0.05)
+boost.model3d <- gbm(irmjfy ~. , data = NSDUH_test_set_3,distribution = "gaussian", n.trees = 1000,shrinkage =0.1)
+```
+
+
+
+###### Comapring the shrinkage parametes:
+
+```{r}
+model3.err <- data.frame(
+  Trees=1:1000,
+  Error=c(boost.model3a$train.error,boost.model3b$train.error, boost.model3c$train.error,boost.model3d$train.error),
+  Type=rep(c("BOOST, λ=0.01","BOOST, λ=0.02", "BOOST, λ=0.05","BOOST, λ=0.1"), each=1000)
+)
+ggplot(data=model3.err, aes(x=Trees, y=Error)) +  geom_line(aes(color=Type)) + ggtitle("Error vs Number of Trees") +xlim(0,1000)+theme(plot.title = element_text(hjust=0.5))
+```
+
+###### Training and Test Mse for boosting model with best shrinkage value of 0.02
+
+```{r}
+boost.model3b.train <- gbm(irmjfy ~. , data = NSDUH_train_set_3,distribution = "gaussian", n.trees = 1000,shrinkage =0.05)
+boost.pred3 <- predict(boost.model3b.train,NSDUH_train_set_3,n.trees = 1000)
+print(paste("Training Mse for the boosting model with shrinkage parameter as 0.02 :",mean((boost.pred3 - NSDUH_train_set_3$irmjfy)^2 )))
+
+boost.model3b.test <- gbm(irmjfy ~. , data = NSDUH_test_set_3,distribution = "gaussian", n.trees = 1000,shrinkage =0.05)
+boost.pred3 <- predict(boost.model3b.test,NSDUH_test_set_3,n.trees = 1000)
+print(paste("Test Mse for the boosting model with shrinkage parameter as 0.02 :",mean((boost.pred3 - NSDUH_test_set_3$irmjfy)^2)))
+
+```
+
+The Test Mse of the boosting model is 85.7 which has significantly improved.
+
+
+###### Comparing the Performance of the Ensembel methods for the model 3
+
+
+```{r}
+length(boost.model3d$train.error)
+```
+
+```{r}
+# Graph to plot the error rate for different parameters for m = p,p/2,srt(p)
+
+model3.err <- data.frame(
+  Trees=1:1000,
+  Error=c(rf.model3a$mse,rf.model3s$mse,boost.model3c$train.error),
+  Type=rep(c("RF, m=2","BAG, m=13","BOOST, λ=0.05"), each=1000)
+)
+ggplot(data=model3.err, aes(x=Trees, y=Error)) +  geom_line(aes(color=Type)) + ggtitle("Error vs Number of Trees") +xlim(0,1000)+ylim(1000,2500)+theme(plot.title = element_text(hjust=0.5))+guides(color = guide_legend(title = "Methods, Parameters"))
+```
